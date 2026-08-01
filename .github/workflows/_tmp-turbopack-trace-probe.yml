@@ -1,0 +1,71 @@
+name: TEMP Turbopack Memory Trace Probe
+
+# Throwaway diagnostic — NOT meant to be merged. Investigates the "Build (advisory)"
+# job's Turbopack compile-pass OOM (see PR #9060 for the prior, now-concluded
+# fs-cache/minify probe). Runs the production build directly with
+# --experimental-debug-memory-usage to capture continuous RSS/heap stats (plus an
+# automatic heap snapshot near the memory ceiling, if the OOM is heap-driven) on
+# the real ubuntu-latest runner. A local run on a 32GB/10-core Mac with the same
+# native-module-blocked conditions as CI completed successfully at ~7.7GB peak
+# RSS -- well under CI's documented 16GB/4-core budget -- so this run exists to
+# get the equivalent number from the actual failing environment for comparison.
+# NEXT_TURBOPACK_TRACING was tried locally and dropped: the trace file was 3.5GB
+# and only viewable via a WebSocket-based browser UI, not practical to analyze
+# here, and running both instruments together adds overhead that could itself
+# distort the memory profile being measured.
+# Bypasses build-next-isolated.mjs deliberately to avoid touching tested build
+# tooling for a one-off diagnostic. Scoped to this branch only — never present on
+# release/v3.8.50, so it never runs on any other contributor's PR.
+
+on:
+  pull_request:
+    branches: [release/v3.8.50]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  trace-probe:
+    name: Turbopack memory trace (diagnostic, throwaway)
+    if: ${{ github.event.pull_request.draft == false }}
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    # Job-level backstop only -- the real cap is on the build step below. A
+    # job-level timeout kills the whole job (including the if: always() upload
+    # step) immediately; the first run of this probe hit exactly that: the
+    # build step alone ran ~29 min before a 30-minute JOB timeout force-killed
+    # everything, so no log/artifact was ever captured. Scoping the timeout to
+    # the step instead lets the job continue to the upload step no matter how
+    # the build step ends (finishes, times out, or crashes).
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+          cache: npm
+      - uses: ./.github/actions/npm-ci-retry
+      - name: Run diagnostic build with memory profiling
+        continue-on-error: true
+        timeout-minutes: 60
+        env:
+          NODE_OPTIONS: "--max-old-space-size=8192"
+        run: |
+          node node_modules/next/dist/bin/next build --turbopack --experimental-debug-memory-usage 2>&1 | tee build-trace-output.log
+      - name: Upload memory diagnostic artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: turbopack-trace-probe
+          path: |
+            build-trace-output.log
+            *.heapsnapshot
+          if-no-files-found: warn
+          retention-days: 3
